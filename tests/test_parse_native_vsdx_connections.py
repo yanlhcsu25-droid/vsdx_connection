@@ -2,6 +2,7 @@ import csv
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 
@@ -43,11 +44,46 @@ class CommandLinePathTest(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(
-    NATIVE_ERROR_FIXTURE.exists() and NATIVE_RIGHT_FIXTURE.exists(),
-    "native VSDX fixtures unavailable",
-)
 class NativeVsdxXmlOnlyTest(unittest.TestCase):
+    def test_reports_only_connectors_with_missing_native_endpoints(self):
+        page = '''<PageContents xmlns="http://schemas.microsoft.com/office/visio/2012/main">
+          <Shapes>
+            <Shape ID="1" Type="Shape"><Cell N="PinX" V="1"/><Cell N="PinY" V="1"/><Cell N="Width" V="1"/><Cell N="Height" V="1"/><Text>MODULE_A</Text></Shape>
+            <Shape ID="2" Type="Shape"><Cell N="PinX" V="5"/><Cell N="PinY" V="1"/><Cell N="Width" V="1"/><Cell N="Height" V="1"/><Text>MODULE_B</Text></Shape>
+            <Shape ID="10" Type="Shape"><Cell N="BeginX" V="1"/><Cell N="BeginY" V="1"/><Cell N="EndX" V="5"/><Cell N="EndY" V="1"/></Shape>
+            <Shape ID="11" Type="Shape"><Cell N="BeginX" V="1"/><Cell N="BeginY" V="2"/><Cell N="EndX" V="5"/><Cell N="EndY" V="2"/></Shape>
+            <Shape ID="12" Type="Shape"><Cell N="BeginX" V="1"/><Cell N="BeginY" V="3"/><Cell N="EndX" V="5"/><Cell N="EndY" V="3"/></Shape>
+            <Shape ID="13" Type="Shape"><Cell N="BeginX" V="1"/><Cell N="BeginY" V="4"/><Cell N="EndX" V="5"/><Cell N="EndY" V="4"/></Shape>
+          </Shapes>
+          <Connects>
+            <Connect FromSheet="10" FromCell="BeginX" ToSheet="1"/><Connect FromSheet="10" FromCell="EndX" ToSheet="2"/>
+            <Connect FromSheet="11" FromCell="BeginX" ToSheet="1"/>
+            <Connect FromSheet="12" FromCell="EndX" ToSheet="2"/>
+          </Connects>
+        </PageContents>'''
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing-endpoints.vsdx"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("visio/pages/page1.xml", page)
+            result = parse_vsdx(path)
+
+        self.assertEqual(
+            ["page1:11", "page1:12", "page1:13"],
+            [row["连接器ID"] for row in result.connection_issues],
+        )
+        self.assertEqual(
+            ["end_missing", "begin_missing", "both_missing"],
+            [row["问题类型"] for row in result.connection_issues],
+        )
+        self.assertEqual("MODULE_A", result.connection_issues[0]["Begin端模块"])
+        self.assertEqual("/", result.connection_issues[0]["End端模块"])
+        self.assertEqual("MODULE_B", result.connection_issues[1]["End端模块"])
+        self.assertEqual((1.0, 4.0, 5.0, 4.0), tuple(
+            result.connection_issues[2][field]
+            for field in ("BeginX", "BeginY", "EndX", "EndY")
+        ))
+
+    @unittest.skipUnless(NATIVE_ERROR_FIXTURE.exists(), "native error fixture unavailable")
     def test_xml_only_mode_does_not_classify_compound_pad_labels(self):
         rows = {
             row["连接器ID"]: row for row in parse_vsdx(NATIVE_ERROR_FIXTURE).rows
@@ -58,6 +94,7 @@ class NativeVsdxXmlOnlyTest(unittest.TestCase):
             (rows["page1:352"]["目标模块"], rows["page1:352"]["目标端口名"]),
         )
 
+    @unittest.skipUnless(NATIVE_RIGHT_FIXTURE.exists(), "native right fixture unavailable")
     def test_xml_only_mode_preserves_rows_but_withholds_endpoint_semantics(self):
         rows = {
             row["连接器ID"]: row for row in parse_vsdx(NATIVE_RIGHT_FIXTURE).rows

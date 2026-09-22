@@ -37,7 +37,8 @@ def workbook_values(path):
                     if text is not None:
                         values.append(text.text)
                     elif number is not None:
-                        values.append(int(number.text))
+                        value = float(number.text)
+                        values.append(int(value) if value.is_integer() else value)
                     else:
                         values.append(None)
                 rows.append(values)
@@ -46,7 +47,7 @@ def workbook_values(path):
 
 
 class WiaWorkbookTest(unittest.TestCase):
-    def test_writes_exact_template_sheets_headers_and_rows(self):
+    def test_writes_connection_issues_without_changing_connect_sheet(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "result.xlsx"
             write_wia_workbook(
@@ -63,11 +64,27 @@ class WiaWorkbookTest(unittest.TestCase):
                     "target_port": "S_AXI", "bus_protocol": "AXI4",
                     "direction": "Master->Slave",
                 }],
+                connection_issue_rows=[{
+                    "页面": 1,
+                    "连接器ID": "page1:9",
+                    "问题类型": "begin_missing",
+                    "Begin端模块": "/",
+                    "Begin端Shape ID": "/",
+                    "BeginX": 9.815,
+                    "BeginY": 12.276,
+                    "End端模块": "NPC",
+                    "End端Shape ID": "1",
+                    "EndX": 10.25,
+                    "EndY": 12.276,
+                }],
             )
 
             values = workbook_values(path)
 
-        self.assertEqual(["hierarchy", "port", "connect"], list(values))
+        self.assertEqual(
+            ["hierarchy", "port", "connect", "connection_issues"],
+            list(values),
+        )
         self.assertEqual(
             ["module_name", "instance_name", "parent module name"],
             values["hierarchy"][0],
@@ -81,6 +98,16 @@ class WiaWorkbookTest(unittest.TestCase):
             values["connect"][0],
         )
         self.assertEqual(1, values["connect"][1][0])
+        self.assertEqual(
+            ["页面", "连接器ID", "问题类型", "Begin端模块", "Begin端Shape ID",
+             "BeginX", "BeginY", "End端模块", "End端Shape ID", "EndX", "EndY"],
+            values["connection_issues"][0],
+        )
+        self.assertEqual(
+            [1, "page1:9", "begin_missing", "/", "/", 9.815, 12.276,
+             "NPC", "1", 10.25, 12.276],
+            values["connection_issues"][1],
+        )
 
 
 if __name__ == "__main__":

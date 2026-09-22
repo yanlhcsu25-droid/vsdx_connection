@@ -4,7 +4,8 @@
 
 - 原始连接表：CSV、Markdown；
 - 解析校验报告：JSON；
-- WIA 格式工作簿：`hierarchy`、`port`、`connect` 三个工作表；
+- WIA 格式工作簿：`hierarchy`、`port`、`connect` 和
+  `connection_issues` 四个工作表；
 - 疑问项：不能从图中可靠确定的信息单独写入 JSON，不猜测填充。
 - 语义实体：保留VLM判断过的Shape角色、文本、owner和页面证据，供文档实体融合与追溯。
 
@@ -98,7 +99,10 @@ python3 -m unittest discover -s tests -v
 3. 当前正式流程只有VSDX/XML与页面图片。`semantic_context/mock_document_entities.json` 仅为开发样例，不会自动加载。
 4. 模块层次表和顶层端口表只写入有充分证据的数据。无法区分的信息进入 `*_疑问项.json`，因此 `hierarchy` 和 `port` 可能只有表头。
 5. Visio箭头只表示图形方向，不自动等价于RTL `input`、`output` 或 `inout`。
-6. 最终工作簿始终保持 `hierarchy`、`port`、`connect` 三个工作表；准确率与方法说明见 `docs/识别流程与双图评测报告.md`。
+6. 最终工作簿始终保持 `hierarchy`、`port`、`connect`、
+   `connection_issues` 四个工作表。`connection_issues` 只记录原生
+   Begin/End 端点关系不完整的连接器，不推测缺失端的模块，也不输出模型原始回复。
+   准确率与方法说明见 `docs/识别流程与双图评测报告.md`。
 
 ## 文档实体目录契约
 

@@ -48,6 +48,19 @@ FIELDS = [
     "方向",
     "箭头颜色",
 ]
+CONNECTION_ISSUE_FIELDS = [
+    "页面",
+    "连接器ID",
+    "问题类型",
+    "Begin端模块",
+    "Begin端Shape ID",
+    "BeginX",
+    "BeginY",
+    "End端模块",
+    "End端Shape ID",
+    "EndX",
+    "EndY",
+]
 
 
 @dataclass(frozen=True)
@@ -69,6 +82,7 @@ class ParseResult:
     classified_terminal_shape_count: int = 0
     requested_shape_count: int = 0
     classified_requested_shape_count: int = 0
+    connection_issues: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -436,6 +450,68 @@ def _page_rows(page: ET.Element, page_number: int) -> tuple[list[dict[str, objec
     return rows, unresolved
 
 
+def _page_connection_issues(
+    page: ET.Element, page_number: int
+) -> list[dict[str, object]]:
+    """Describe connectors whose native Begin/End Glue facts are incomplete."""
+    all_shapes = {shape.get("ID", ""): shape for shape in page.findall(f".//{V}Shape")}
+    top_parent = page.find(f"{V}Shapes")
+    top_shapes = top_parent.findall(f"{V}Shape") if top_parent is not None else []
+    container_owners = _container_owners(top_shapes)
+    connectors = {
+        shape_id: shape
+        for shape_id, shape in all_shapes.items()
+        if "BeginX" in _cells(shape)
+    }
+    endpoints: dict[str, dict[str, str]] = {shape_id: {} for shape_id in connectors}
+    for connect in page.findall(f".//{V}Connect"):
+        connector_id = connect.get("FromSheet", "")
+        from_cell = connect.get("FromCell", "")
+        if connector_id in endpoints and from_cell in {"BeginX", "EndX"}:
+            endpoints[connector_id][from_cell] = connect.get("ToSheet", "")
+
+    issues = []
+    for connector_id, connector in sorted(connectors.items(), key=lambda item: int(item[0])):
+        endpoint_ids = endpoints[connector_id]
+        has_begin = "BeginX" in endpoint_ids
+        has_end = "EndX" in endpoint_ids
+        if has_begin and has_end:
+            continue
+        begin_shape = (
+            _endpoint_shape(
+                all_shapes.get(endpoint_ids["BeginX"]), connector, "Begin", top_shapes
+            )
+            if has_begin else None
+        )
+        end_shape = (
+            _endpoint_shape(
+                all_shapes.get(endpoint_ids["EndX"]), connector, "End", top_shapes
+            )
+            if has_end else None
+        )
+        begin_module = _endpoint(begin_shape, top_shapes, container_owners)[0]
+        end_module = _endpoint(end_shape, top_shapes, container_owners)[0]
+        issue_type = (
+            "both_missing" if not has_begin and not has_end
+            else "begin_missing" if not has_begin
+            else "end_missing"
+        )
+        issues.append({
+            "页面": page_number,
+            "连接器ID": f"page{page_number}:{connector_id}",
+            "问题类型": issue_type,
+            "Begin端模块": begin_module if has_begin else "/",
+            "Begin端Shape ID": begin_shape.get("ID", "") if begin_shape is not None else "/",
+            "BeginX": _number(connector, "BeginX"),
+            "BeginY": _number(connector, "BeginY"),
+            "End端模块": end_module if has_end else "/",
+            "End端Shape ID": end_shape.get("ID", "") if end_shape is not None else "/",
+            "EndX": _number(connector, "EndX"),
+            "EndY": _number(connector, "EndY"),
+        })
+    return issues
+
+
 def _arrow_color(connector, page):
     candidates = [connector]
     # A linked visual group's actual painted children represent its arrow.
@@ -670,6 +746,7 @@ def parse_vsdx(
     classified_terminal_shape_count = 0
     requested_shape_count = 0
     classified_requested_shape_count = 0
+    connection_issues: list[dict[str, object]] = []
     clock = _clock or time.perf_counter
     with zipfile.ZipFile(path) as archive:
         page_names = sorted(
@@ -679,6 +756,7 @@ def parse_vsdx(
         for page_name in page_names:
             page_number = int(PAGE_RE.fullmatch(page_name).group(1))
             page = ET.fromstring(archive.read(page_name))
+            connection_issues.extend(_page_connection_issues(page, page_number))
             if resolver is None:
                 page_rows, page_unresolved = _page_rows(page, page_number)
                 for row in page_rows:
@@ -871,6 +949,7 @@ def parse_vsdx(
         classified_terminal_shape_count=classified_terminal_shape_count,
         requested_shape_count=requested_shape_count,
         classified_requested_shape_count=classified_requested_shape_count,
+        connection_issues=tuple(connection_issues),
     )
 
 
@@ -1010,6 +1089,7 @@ def write_outputs(result: ParseResult, output_dir: Path, stem: str) -> OutputPat
         hierarchy_rows=formal.hierarchy,
         port_rows=formal.ports,
         connect_rows=formal.connections,
+        connection_issue_rows=result.connection_issues,
     )
     semantic_questions = [
         {
