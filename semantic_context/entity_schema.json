@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Document-derived diagram entity catalog",
+  "type": "object",
+  "required": ["schema_version", "source", "entities"],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "source": {
+      "type": "object",
+      "required": ["type", "is_simulated"],
+      "properties": {
+        "type": {"type": "string"},
+        "document": {"type": "string"},
+        "is_simulated": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "entities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["canonical_name", "entity_type", "aliases", "evidence"],
+        "properties": {
+          "canonical_name": {"type": "string", "minLength": 1},
+          "entity_type": {
+            "enum": ["module", "port", "protocol", "signal", "width"]
+          },
+          "aliases": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "evidence": {"type": "array"},
+          "module_name": {"type": "string"},
+          "instance_name": {"type": "string"},
+          "parent_instance_name": {"type": "string"},
+          "port_name": {"type": "string"},
+          "is_top_level": {"type": "boolean"},
+          "direction": {"enum": ["input", "output", "inout"]},
+          "width": {"type": ["string", "integer"]}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

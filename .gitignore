@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+config/vision.json
+examples/
+Golden/
+output/
+results/
+reports/
+debug/
+*.vsdx
+*.png
+*.zip
+
