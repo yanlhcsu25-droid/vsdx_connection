@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract architecture connections from an uncompressed draw.io XML file."""
+"""Extract instance graphs and connections from native draw.io XML files."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import csv
 import html
 import json
 import re
+import shutil
 import urllib.parse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -33,56 +34,37 @@ class DrawioParseResult:
     complete_connections: int
     missing_source: int
     missing_target: int
+    native_missing_source: int
+    native_missing_target: int
+    inferred_source: int
+    inferred_target: int
+    unresolved_endpoints: tuple[dict[str, str], ...]
+    endpoint_evidence: tuple[dict[str, str], ...]
+    questions: tuple[dict[str, object], ...]
+    hierarchy: tuple[dict[str, str], ...]
+    graph: dict[str, object]
 
 
 def _label(cell: ET.Element | None) -> str:
     if cell is None:
         return ""
     raw = cell.get("value", "") or ""
-    port = re.match(r"^([msp]\d+)", raw, re.I)
-    if port:
-        return port.group(1)
     decoded = urllib.parse.unquote(raw)
     text = re.sub(r"<[^>]+>", "", decoded)
     return re.sub(r"\s+", " ", html.unescape(text)).strip()
 
 
-def _area(cell: ET.Element) -> float:
-    geometry = cell.find("mxGeometry")
+def _edge_point(edge: ET.Element, name: str) -> tuple[float, float] | None:
+    geometry = edge.find("mxGeometry")
     if geometry is None:
-        return 0.0
+        return None
+    point = geometry.find(f"mxPoint[@as='{name}']")
+    if point is None:
+        return None
     try:
-        return float(geometry.get("width", "0")) * float(geometry.get("height", "0"))
-    except ValueError:
-        return 0.0
-
-
-def _endpoint(
-    cell: ET.Element | None,
-    children: dict[str, list[ET.Element]],
-) -> tuple[str, str]:
-    if cell is None:
-        return "/", "/"
-    label = _label(cell)
-    pad = PAD_RE.fullmatch(label)
-    if pad:
-        return _normalize_pad_label(pad.group(1)), _normalize_pad_label(pad.group(2))
-    if MODULE_RE.search(label):
-        return label, "/"
-
-    parent = cell.get("parent", "")
-    siblings = [
-        candidate
-        for candidate in children.get(parent, [])
-        if candidate is not cell
-        and candidate.get("vertex") == "1"
-        and _label(candidate)
-        and _area(candidate) > _area(cell)
-    ]
-    if siblings:
-        owner = max(siblings, key=_area)
-        return _label(owner), label or "/"
-    return label or "/", "/"
+        return float(point.get("x", "")), float(point.get("y", ""))
+    except (KeyError, ValueError):
+        return None
 
 
 def _style_map(style: str) -> dict[str, str]:
@@ -94,56 +76,92 @@ def _style_map(style: str) -> dict[str, str]:
     return values
 
 
-def _direction(style: str) -> str:
-    values = _style_map(style)
-    begin = values.get("startArrow", "none") not in {"", "none", "0"}
-    end = values.get("endArrow", "none") not in {"", "none", "0"}
-    if begin and end:
-        return "双向"
-    if end:
-        return "源→目标"
-    if begin:
-        return "目标→源"
-    return "/"
+def _contains_bounds(
+    outer: tuple[float, float, float, float],
+    inner: tuple[float, float, float, float],
+    *,
+    tolerance: float = 0.01,
+) -> bool:
+    ox, oy, ow, oh = outer
+    ix, iy, iw, ih = inner
+    return (
+        ox <= ix + tolerance
+        and oy <= iy + tolerance
+        and ox + ow >= ix + iw - tolerance
+        and oy + oh >= iy + ih - tolerance
+        and ow * oh > iw * ih
+    )
 
 
 def parse_drawio(path: Path) -> DrawioParseResult:
-    root = ET.parse(path).getroot()
-    cells = root.findall(".//mxCell")
-    by_id = {cell.get("id", ""): cell for cell in cells}
-    children: dict[str, list[ET.Element]] = {}
-    for cell in cells:
-        children.setdefault(cell.get("parent", ""), []).append(cell)
-
+    from drawio_graph import read_pages, build_graph
+    pages = read_pages(path)
+    graph = build_graph(pages)
+    page_ids = [{cell.get("id") for cell in page.iter("mxCell")} for page in pages]
     rows = []
-    for edge in (cell for cell in cells if cell.get("edge") == "1"):
-        source_module, source_port = _endpoint(by_id.get(edge.get("source", "")), children)
-        target_module, target_port = _endpoint(by_id.get(edge.get("target", "")), children)
-        style = edge.get("style", "") or ""
+    endpoint_evidence = []
+    unresolved_endpoints = []
+    questions = []
+    directions = {"bidirectional": "双向", "source_to_target": "源→目标",
+                  "target_to_source": "目标→源", "unknown": "unknown"}
+    for edge in graph["connections"]:
         rows.append({
-            "连接器ID": f"drawio:{edge.get('id', '')}",
-            "页面": 1,
-            "源模块口名": source_port,
-            "源模块": source_module,
-            "目标端口名": target_port,
-            "目标模块": target_module,
-            "总线/信协议": "/",
-            "数据宽度": "/",
-            "方向": _direction(style),
-            "连线颜色/线型": "黑色虚线" if _style_map(style).get("dashed") == "1" else "黑色实线",
+            "连接器ID": edge["connector_id"], "页面": edge["page"],
+            "源模块口名": edge["source_port_name"] or "/",
+            "源模块": edge["source_module_name"] or "/",
+            "目标端口名": edge["target_port_name"] or "/",
+            "目标模块": edge["target_module_name"] or "/",
+            "总线/信协议": edge["protocol"] or "/", "数据宽度": "/",
+            "方向": directions[edge["direction"]], "箭头颜色": "(0, 0, 0)",
+            "序号": len(rows) + 1,
         })
-
-    for index, row in enumerate(rows, 1):
-        row["序号"] = index
-    missing_source = sum(row["源模块"] == "/" for row in rows)
-    missing_target = sum(row["目标模块"] == "/" for row in rows)
+        endpoint_evidence.append({
+            "connector_id": edge["connector_id"],
+            "source_evidence": edge["source_evidence"],
+            "source_shape_id": edge["source_resolved_shape_id"],
+            "target_evidence": edge["target_evidence"],
+            "target_shape_id": edge["target_resolved_shape_id"],
+        })
+        for endpoint in ("source", "target"):
+            if not edge[endpoint + "_module_id"]:
+                item = {"connector_id": edge["connector_id"], "endpoint": endpoint}
+                unresolved_endpoints.append(item)
+                questions.append({**item, "reason": "unresolved endpoint"})
+        if edge["status"] == "needs_review":
+            questions.append({"connector_id": edge["connector_id"], "reason": edge["reason"],
+                "candidate_source_id": edge["candidate_source_id"],
+                "candidate_target_id": edge["candidate_target_id"]})
+    # Retain existing duplicate/legacy reference-point diagnostic.
+    for page_number, page in enumerate(pages, 1):
+        signatures = {}
+        for edge in page.iter("mxCell"):
+            if edge.get("edge") != "1":
+                continue
+            points = (_edge_point(edge, "sourcePoint"), _edge_point(edge, "targetPoint"))
+            if all(point is not None for point in points):
+                signatures.setdefault(points, []).append(edge)
+        for signature, edges in signatures.items():
+            if len(edges) < 2:
+                continue
+            def connector(edge):
+                return "drawio:" + (f"page{page_number}:" if len(pages) > 1 else "") + edge.get("id", "")
+            for edge in edges:
+                if not edge.get("source") and not edge.get("target") and not _label(edge):
+                    questions.append({"connector_id": connector(edge),
+                        "reason": "possible duplicate or legacy edge",
+                        "matching_connectors": [connector(other) for other in edges if other is not edge],
+                        "reference_points": {"source":list(signature[0]), "target":list(signature[1])}})
     return DrawioParseResult(
-        source=str(path),
-        rows=tuple(rows),
-        connector_count=len(rows),
-        complete_connections=sum(row["源模块"] != "/" and row["目标模块"] != "/" for row in rows),
-        missing_source=missing_source,
-        missing_target=missing_target,
+        source=str(path), rows=tuple(rows), connector_count=len(rows),
+        complete_connections=sum(bool(e["source_module_id"] and e["target_module_id"]) for e in graph["connections"]),
+        missing_source=sum(not e["source_module_id"] for e in graph["connections"]),
+        missing_target=sum(not e["target_module_id"] for e in graph["connections"]),
+        native_missing_source=sum(e["original_source_id"] not in page_ids[e["page"]-1] for e in graph["connections"]),
+        native_missing_target=sum(e["original_target_id"] not in page_ids[e["page"]-1] for e in graph["connections"]),
+        inferred_source=sum(e["source_evidence"] == "geometric" for e in graph["connections"]),
+        inferred_target=sum(e["target_evidence"] == "geometric" for e in graph["connections"]),
+        unresolved_endpoints=tuple(unresolved_endpoints), endpoint_evidence=tuple(endpoint_evidence),
+        questions=tuple(questions), hierarchy=tuple(graph["hierarchy"]), graph=graph,
     )
 
 
@@ -155,13 +173,90 @@ def write_outputs(result: DrawioParseResult, output_dir: Path, stem: str) -> tup
         writer = csv.DictWriter(stream, fieldnames=FIELDS)
         writer.writeheader()
         writer.writerows(result.rows)
-    report_path.write_text(json.dumps({
+    report = {
         "source": result.source,
         "connector_count": result.connector_count,
         "complete_connections": result.complete_connections,
         "missing_source": result.missing_source,
         "missing_target": result.missing_target,
-    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        "native_missing_source": result.native_missing_source,
+        "native_missing_target": result.native_missing_target,
+        "inferred_source": result.inferred_source,
+        "inferred_target": result.inferred_target,
+        "unresolved_endpoints": result.unresolved_endpoints,
+        "endpoint_evidence": result.endpoint_evidence,
+        "questions": result.questions,
+        "hierarchy_count": len(result.hierarchy),
+        "port_count": len(result.graph["ports"]),
+        "connection_issue_count": len(result.graph["connection_issues"]),
+        "hierarchy_issues": result.graph["hierarchy_issues"],
+        "structured_graph": "structured_graph.json",
+        "schema_version": result.graph["schema_version"],
+    }
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    markdown_path = output_dir / f"{stem}_连线表.md"
+    with markdown_path.open("w", encoding="utf-8") as stream:
+        stream.write(f"# {stem} 连线表\n\n")
+        stream.write(
+            f"> Draw.io 连接器 {result.connector_count} 条；完整双端连接 "
+            f"{result.complete_connections} 条；几何补全源端 {result.inferred_source} 条；"
+            f"几何补全目标端 {result.inferred_target} 条；仍缺源端 {result.missing_source} 条；"
+            f"仍缺目标端 {result.missing_target} 条。\n\n"
+        )
+        stream.write("| " + " | ".join(FIELDS) + " |\n")
+        stream.write("|" + "|".join("---" for _ in FIELDS) + "|\n")
+        for row in result.rows:
+            stream.write(
+                "| "
+                + " | ".join(str(row[field]).replace("|", "\\|") for field in FIELDS)
+                + " |\n"
+            )
+
+    questions_path = output_dir / f"{stem}_疑问项.json"
+    questions_path.write_text(
+        json.dumps(result.questions, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    from wia_output import write_wia_workbook
+    graph = result.graph
+    (output_dir / "structured_graph.json").write_text(
+        json.dumps(graph, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    connect_rows = []
+    for edge in graph["connections"]:
+        if not edge["source_module_id"] or not edge["target_module_id"]:
+            continue
+        connect_rows.append({**edge, "No.":len(connect_rows)+1,
+            "initiator_module_name(发起端实例名/模块名)":edge["source_module_name"],
+            "initiator_port":edge["source_port_name"], "target_module_name":edge["target_module_name"],
+            "target_port":edge["target_port_name"], "bus_protocol":edge["protocol"]})
+    issue_rows = [{**edge, "页面":edge["page"], "连接器ID":edge["connector_id"],
+        "问题类型":edge["reason"], "Begin端模块":edge["source_module_name"],
+        "Begin端Shape ID":edge["original_source_id"], "End端模块":edge["target_module_name"],
+        "End端Shape ID":edge["original_target_id"],
+        "BeginX":edge["source_point"][0] if edge["source_point"] else "",
+        "BeginY":edge["source_point"][1] if edge["source_point"] else "",
+        "EndX":edge["target_point"][0] if edge["target_point"] else "",
+        "EndY":edge["target_point"][1] if edge["target_point"] else ""}
+        for edge in graph["connection_issues"]]
+    workbook_path = output_dir / f"{stem}_wia输出.xlsx"
+    write_wia_workbook(workbook_path, hierarchy_rows=graph["hierarchy"],
+        port_rows=graph["ports"], connect_rows=connect_rows,
+        connection_issue_rows=issue_rows, include_connection_issues=True,
+        extended_drawio=True)
+
+    aliases = {
+        "connections.csv": csv_path,
+        "connections.xlsx": workbook_path,
+        "validation.json": report_path,
+        "questions.json": questions_path,
+        "report.md": markdown_path,
+    }
+    for name, source in aliases.items():
+        shutil.copyfile(source, output_dir / name)
     return csv_path, report_path
 
 

@@ -47,6 +47,51 @@ def workbook_values(path):
 
 
 class WiaWorkbookTest(unittest.TestCase):
+    def test_default_output_matches_three_sheet_wia_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "result.xlsx"
+            write_wia_workbook(
+                path,
+                hierarchy_rows=[],
+                port_rows=[],
+                connect_rows=[],
+                connection_issue_rows=[{"问题类型": "end_missing"}],
+            )
+
+            values = workbook_values(path)
+
+        self.assertEqual(["hierarchy", "port", "connect"], list(values))
+
+    def test_preserves_template_namespaces_required_by_excel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "result.xlsx"
+            write_wia_workbook(
+                path,
+                hierarchy_rows=[],
+                port_rows=[],
+                connect_rows=[],
+                connection_issue_rows=[],
+            )
+            with zipfile.ZipFile(path) as archive:
+                workbook_xml = archive.read("xl/workbook.xml")
+
+        self.assertIn(b'xmlns:x15="http://schemas.microsoft.com/office/', workbook_xml)
+
+    def test_can_write_exact_three_sheet_reference_format(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "result.xlsx"
+            write_wia_workbook(
+                path,
+                hierarchy_rows=[],
+                port_rows=[],
+                connect_rows=[],
+                include_connection_issues=False,
+            )
+
+            values = workbook_values(path)
+
+        self.assertEqual(["hierarchy", "port", "connect"], list(values))
+
     def test_writes_connection_issues_without_changing_connect_sheet(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "result.xlsx"
@@ -77,6 +122,7 @@ class WiaWorkbookTest(unittest.TestCase):
                     "EndX": 10.25,
                     "EndY": 12.276,
                 }],
+                include_connection_issues=True,
             )
 
             values = workbook_values(path)

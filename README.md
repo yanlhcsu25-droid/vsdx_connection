@@ -92,6 +92,66 @@ python3 code/parse_native_vsdx_connections.py /path/to/input.vsdx
 python3 -m unittest discover -s tests -v
 ```
 
+## 原生 Draw.io 实例图解析（无需 API Key）
+
+```bash
+python3 code/parse_drawio_connections.py tests/fixtures/chip_subsystem.drawio
+# 也可以显式指定输出目录，原有命令行参数保持兼容
+python3 code/parse_drawio_connections.py /path/to/input.drawio /path/to/output
+```
+
+支持未压缩 XML、压缩 diagram、多个页面及 object/UserObject 包装。
+`tests/fixtures/chip_subsystem.drawio` 是验收原图的原样副本，避免依赖企业微信缓存路径。
+算法没有使用样例 Shape ID 或 CSS_TOP/Core 等名称映射。
+
+Draw.io 输出 `hierarchy`、`port`、`connect`、`connection_issues` 四张表，
+并新增 `structured_graph.json`（schema_version=2.0）：
+
+- `hierarchy`：原始 Shape ID、唯一父 ID、ID 路径和名称路径、绝对坐标、父关系证据及候选；同名模块不合并。
+- `contains`：只表示包含关系，不生成导线。
+- `connections`：枚举全部 Edge，保存原生端点、解析端点、候选、协议、方向、XML 样式及路径证据。
+- `objects`：保存全部 mxCell 的原始属性、几何 XML、分类及理由；四个 CHI 为 annotation，未伪造为模块或端口。
+- `ports`：仅明确端口元数据、已有复合 PAD 标签约定和有唯一模块框归属的分组信号标签约定。约定推断会记录分类依据；普通子模块不会作为端口。
+- `hierarchy_issues` / `connection_issues`：保留层级歧义、循环、缺失端点、容器内部候选、缺失协议及未知箭头方向。
+
+原生 parent 关系优先，跳过无名布局 Group 找到最近模块祖先；没有原生模块父节点时，
+仅在几何候选中存在唯一最内层容器时恢复父关系。重叠或等大的候选框不强制选父；
+原生与几何父关系组合成循环时，撤销循环关系并保留异常。
+
+几何补全仅接受唯一接触边界的模块/已归属端口。原生端点引用失效时保留原引用并报错，
+不偷偷改绑。容器的内部子模块候选根据边界邻近和轴向对齐生成，始终不会覆盖原生终点。
+没有存储的明确路由时，不虚构自动正交路由；自由协议文本仅在文字和路由相互唯一关联时
+生成几何关联并标记 needs_review。箭头方向是图形方向，不等同 RTL 输入输出或协议主从。
+
+### 字段迁移与状态含义
+
+保留 hierarchy 的前三列、port 的前三列、connect 的前七列及 CSV 原有列顺序，新增列均追加。
+Visio 调用的默认 Excel 格式不变；只有 Draw.io 使用 `extended_drawio=True`。
+旧端口字段现在只写端口名称，真实子模块名称写到模块字段；下游应优先使用
+`source_module_id` / `target_module_id`，而不是把父框名称和端口名称拼接为节点。
+
+单页 module_id 等于原始 Shape ID，connector_id 为 `drawio:<Shape ID>`。
+多页 ID 使用 `page<N>:` 命名空间，原始 ID 另存，避免不同页面的局部 ID 冲突。
+`hierarchy_path` 是 ID 数组，Excel 中用 JSON 字符串保存；名称路径用于展示，不用于唯一匹配。
+
+Draw.io Excel / JSON direction 为 `bidirectional`、`source_to_target`、
+`target_to_source` 或 `unknown`；兼容 CSV 对已知箭头仍使用中文，未知方向也输出 `unknown`。
+旧列 initiator_module_name 仅保留列名兼容，其内容是 XML source 对应模块，不保证为电气发起端。
+
+`confirmed` 表示解析端点已确定，`needs_review` 表示端点已确定但存在未证实的内部候选
+或几何协议关联，`unresolved` 表示至少一端无法确定。
+connect 可保留已经确定的容器级关系及其 needs_review 状态；候选 ID 仅在候选列，
+不会被写成 source/target_module_id。未知方向独立进入 issues，即使端点状态为 confirmed。
+因此 connect 和 connection_issues 可能同时引用同一个连接器，核对覆盖时应按 connector_id 去重。
+完整原始连接集以 JSON connections / CSV 为准，connect 只保留双端已解析的关系。
+
+### 已知边界
+
+无明确元数据的背景框、说明框与模块框在 XML 中可能同形；默认保存命名非文本结构框，
+不会声称能完全判定设计者的业务语义。显式 background=1 或 object_type=background 排除为背景。
+旋转/特殊 stencil 的边界、自动路由的实际折线、以及电气端口方向未由当前几何算法恢复；
+相关原始样式和 XML 保留供复核。应优先用多图人工标注评估候选与分类规则，再考虑局部视觉辅助。
+
 ## 当前输出原则和限制
 
 1. XML/VSDX 负责 Shape、Group、Glue、连接端点和图形箭头等连接事实。拓扑先确定，语义只能读取拓扑，不能反向修改拓扑。
